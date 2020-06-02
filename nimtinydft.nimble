@@ -8,8 +8,7 @@ srcDir        = "src"
 installExt    = @["nim"]
 bin           = @["nimtinydft"]
 
-
-
 # Dependencies
 
 requires "nim >= 1.2.0"
+requires "arraymancer"

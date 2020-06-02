@@ -1,3 +1,4 @@
+import strformat
 import unittest
 
 import arraymancer
@@ -164,12 +165,40 @@ proc `+`*[T: SomeNumber|Complex[float32]|Complex[float64]](t: Tensor[T], a: T): 
   ## Element-wise addition with a scalar
   a + t
 
+proc `/`*[T: SomeFloat|Complex[float32]|Complex[float64]](a: T, t: Tensor[T]): Tensor[T] {.noInit.} =
+  # returnEmptyIfEmpty(t)
+  t.map_inline(a / x)
+
 # #########################################################
 # # Tensor-scalar in-place linear algebra
 
 proc `+=`*[T: SomeNumber|Complex[float32]|Complex[float64]](t: var Tensor[T], a: T) =
   ## Element-wise addition with a scalar (in-place)
   t.apply_inline(x + a)
+
+# see Arraymancer/benchmarks/pca
+
+func diag[T](d: Tensor[T]): Tensor[T] =
+  ## If d is a vector, create a square diagonal matrix from it.
+  ## If d is a matrix, return the diagonal of it as a vector.
+  let dd = d.shape[0]
+  case d.rank
+  of 1:
+    result = zeros[T](dd, dd)
+    for ii in 0..<dd:
+      result[ii, ii] = d[ii]
+  of 2:
+    if dd != d.shape[1]:
+      raise newException(
+        ValueError, fmt"Cannot extract diagonal from non-rectangular matrix, got {d.shape}"
+      )
+    result = zeros[T](dd)
+    for ii in 0..<dd:
+      result[ii] = d[ii, ii]
+  else:
+    raise newException(
+      ValueError, fmt"Cannot do diagonal operations on tensor of rank other than 1 or 2, got {d.rank}"
+    )
 
 func legvander[T](x: seq[T], deg: int): Tensor[T] =
   if deg < 0:
@@ -191,9 +220,9 @@ type
   LegendreGrid = object of BaseGrid
     npoint: int
     basis: Tensor[float]
-    # basis_inv: Tensor[float]
+    basis_inv: Tensor[float]
 
-func newLegendreGrid(npoint: int): LegendreGrid =
+proc newLegendreGrid(npoint: int): LegendreGrid =
   let (nodes, weights) = getGaussLegendreWeights(npoint)
   result = LegendreGrid(
     npoint: npoint,
@@ -203,11 +232,23 @@ func newLegendreGrid(npoint: int): LegendreGrid =
   let
     basis = legvander(nodes, npoint - 1)
     (u, s, vt) = basis.svd()
-    # basisInv = einsum(u, s, vt):
-    #   basisInv[i, k] = vt[j, i] * (1.0 / s[j]) * u[k, j]
-    # basisInv = vt * (1.0 / s) * u
+    basisInv = vt.transpose() * (1.0 / s).diag() * u.transpose()
   result.basis = basis
-  # result.basisInv = basisInv
+  result.basisInv = basisInv
+
+func tocoeffs(grid: LegendreGrid, fnvals: Tensor[float]): Tensor[float] =
+  ## Convert function value on a grid to Legendre coefficients.
+  case fnvals.rank
+  of 1:
+    fnvals.diag() * grid.basis_inv.transpose()
+  of 2:
+    fnvals * grid.basis_inv.transpose()
+  else:
+    raise newException(ValueError, fmt"Cannot take fnvals of rank other than 1 or 2, got {fnvals.rank}")
+
+func tofnvals(grid: LegendreGrid, coeffs: Tensor[float]): Tensor[float] =
+  ## Convert Legendre coefficients to function values on a grid.
+  coeffs * grid.basis.transpose()[0 ..< coeffs.shape[^1]]
 
 type
   TransformedGrid = object of BaseGrid
@@ -218,10 +259,17 @@ suite "tinygrid":
     let
       npoint = 5
       (nodes, weights) = getGaussLegendreWeights(npoint)
-    echo legvander(nodes, npoint - 1)
+    # echo legvander(nodes, npoint - 1)
 
   test "low_grid_basics":
     let npoints = [10, 20]
     for npoint in npoints:
       let grid = newLegendreGrid(npoint)
-      echo grid
+      check: grid.basis.shape == [npoint, npoint]
+      check: grid.basisInv.shape == [npoint, npoint]
+      let
+        fn1 = randomTensor[float](npoint, 0.0 .. 1.0)
+        coeffs = grid.tocoeffs(fn1)
+        fn2 = grid.tofnvals(coeffs)
+        diff = fn1.diag() -. fn2
+      echo diff <. 1.0e-14
